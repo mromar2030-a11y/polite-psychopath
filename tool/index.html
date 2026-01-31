@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Positive Match Tool</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Arial;margin:0;line-height:1.6}
+    main{max-width:980px;margin:0 auto;padding:28px}
+    .card{border:1px solid #00000022;border-radius:16px;padding:16px;margin:14px 0}
+    .muted{opacity:.75}
+    img{max-width:100%;border-radius:14px}
+    .row{display:grid;gap:14px}
+    @media(min-width:900px){.row{grid-template-columns:1fr 1fr}}
+    .btn{border:1px solid #00000022;border-radius:12px;padding:10px 14px;background:#fff;cursor:pointer}
+  </style>
+</head>
+<body>
+<main>
+  <a href="../" class="muted">← Back</a>
+  <h1>Find the closest match</h1>
+  <p class="muted">Runs in your browser.</p>
+
+  <div class="row">
+    <div class="card">
+      <h2>Your image</h2>
+      <input id="file" type="file" accept="image/*" />
+      <p class="muted" id="status"></p>
+      <button class="btn" id="match">Match</button>
+      <button class="btn" id="reset" style="margin-left:8px">Reset</button>
+    </div>
+
+    <div class="card">
+      <h2>Closest result</h2>
+      <img id="bestImg" style="display:none" alt="best match" />
+      <p id="bestText" class="muted">No match yet.</p>
+      <p class="muted" id="bestMeta"></p>
+    </div>
+  </div>
+
+  <script>
+    const fileEl = document.getElementById('file');
+    const statusEl = document.getElementById('status');
+    const bestImg = document.getElementById('bestImg');
+    const bestText = document.getElementById('bestText');
+    const bestMeta = document.getElementById('bestMeta');
+    const matchBtn = document.getElementById('match');
+    const resetBtn = document.getElementById('reset');
+
+    let imgBitmap = null;
+
+    function popcount64BigInt(x){
+      let c = 0n;
+      while(x){ x &= (x - 1n); c++; }
+      return Number(c);
+    }
+
+    function dhashFromBitmap(bitmap, size=8){
+      const w = size + 1, h = size;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(bitmap, 0, 0, w, h);
+      const data = ctx.getImageData(0,0,w,h).data;
+
+      let bits = 0n;
+      for(let y=0; y<h; y++){
+        for(let x=0; x<size; x++){
+          const i1 = (y*w + x) * 4;
+          const i2 = (y*w + x + 1) * 4;
+          const g1 = data[i1]*0.299 + data[i1+1]*0.587 + data[i1+2]*0.114;
+          const g2 = data[i2]*0.299 + data[i2+1]*0.587 + data[i2+2]*0.114;
+          bits = (bits << 1n) | (g1 > g2 ? 1n : 0n);
+        }
+      }
+      return bits;
+    }
+
+    async function loadJson(path){
+      const r = await fetch(path, { cache: 'no-store' });
+      if(!r.ok) throw new Error("Failed to load " + path);
+      return await r.json();
+    }
+
+    fileEl.addEventListener('change', async () => {
+      const f = fileEl.files && fileEl.files[0];
+      if(!f) return;
+      imgBitmap = await createImageBitmap(f);
+      statusEl.textContent = "Ready.";
+    });
+
+    resetBtn.addEventListener('click', () => {
+      fileEl.value = "";
+      imgBitmap = null;
+      bestImg.style.display = 'none';
+      bestText.textContent = "No match yet.";
+      bestMeta.textContent = "";
+      statusEl.textContent = "";
+    });
+
+    matchBtn.addEventListener('click', async () => {
+      try{
+        if(!imgBitmap){ statusEl.textContent = "Upload an image first."; return; }
+
+        statusEl.textContent = "Loading dataset…";
+        const [hashes, labels] = await Promise.all([
+          loadJson("../dataset/hashes.json"),
+          loadJson("../dataset/labels.json")
+        ]);
+
+        statusEl.textContent = "Matching…";
+        const myHash = dhashFromBitmap(imgBitmap);
+
+        let bestName = null;
+        let bestDist = 999;
+
+        for(const [name, hex] of Object.entries(hashes)){
+          const h = BigInt("0x" + hex);
+          const dist = popcount64BigInt(myHash ^ h);
+          if(dist < bestDist){
+            bestDist = dist;
+            bestName = name;
+            if(bestDist === 0) break;
+          }
+        }
+
+        if(!bestName){ bestText.textContent = "No match found."; return; }
+
+        bestImg.src = `../dataset/images/${bestName}`;
+        bestImg.style.display = 'block';
+        bestText.textContent = labels[bestName] || "You’ve got this. Keep going.";
+        bestMeta.textContent = `Match: ${bestName} • Distance: ${bestDist}`;
+
+        statusEl.textContent = "Done.";
+      }catch(e){
+        statusEl.textContent = "Error: " + (e?.message || e);
+      }
+    });
+  </script>
+</main>
+</body>
+</html>
