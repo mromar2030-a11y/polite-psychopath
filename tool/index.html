@@ -13,21 +13,32 @@
     .row{display:grid;gap:14px}
     @media(min-width:900px){.row{grid-template-columns:1fr 1fr}}
     .btn{border:1px solid #00000022;border-radius:12px;padding:10px 14px;background:#fff;cursor:pointer}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .line{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px}
   </style>
 </head>
 <body>
 <main>
   <a href="../" class="muted">← Back</a>
   <h1>Find the closest match</h1>
-  <p class="muted">Runs in your browser.</p>
+  <p class="muted">Runs in your browser, then uploads your image + logs the result.</p>
 
   <div class="row">
     <div class="card">
       <h2>Your image</h2>
       <input id="file" type="file" accept="image/*" />
+      <div class="line">
+        <label class="muted" style="display:flex;gap:8px;align-items:center;">
+          <input id="consent" type="checkbox" />
+          I consent to upload this image for storage and logging the match result.
+        </label>
+      </div>
+
       <p class="muted" id="status"></p>
-      <button class="btn" id="match">Match</button>
-      <button class="btn" id="reset" style="margin-left:8px">Reset</button>
+      <div class="line">
+        <button class="btn" id="match" disabled>Match + Upload</button>
+        <button class="btn" id="reset">Reset</button>
+      </div>
     </div>
 
     <div class="card">
@@ -38,8 +49,15 @@
     </div>
   </div>
 
-  <script>
+  <script type="module">
+    import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
+
+    const SUPABASE_URL = "https://jjlptblaycehiibommaz.supabase.co";
+    const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpqbHB0YmxheWNlaGlpYm9tbWF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4Mzg3NzEsImV4cCI6MjA4NTQxNDc3MX0.sSZwDFb8rQBgBq857HWNUVKIBeXwvhEqmyM8-Q6kY0I";
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
+
     const fileEl = document.getElementById('file');
+    const consentEl = document.getElementById('consent');
     const statusEl = document.getElementById('status');
     const bestImg = document.getElementById('bestImg');
     const bestText = document.getElementById('bestText');
@@ -48,6 +66,11 @@
     const resetBtn = document.getElementById('reset');
 
     let imgBitmap = null;
+    let pickedFile = null;
+
+    function updateMatchEnabled(){
+      matchBtn.disabled = !(pickedFile && imgBitmap && consentEl.checked);
+    }
 
     function popcount64BigInt(x){
       let c = 0n;
@@ -82,25 +105,87 @@
       return await r.json();
     }
 
+    function guessExt(file){
+      const name = (file?.name || "").toLowerCase();
+      const parts = name.split(".");
+      if(parts.length > 1){
+        const ext = parts.pop();
+        if(["jpg","jpeg","png","webp","gif","bmp"].includes(ext)) return ext;
+      }
+      const t = (file?.type || "").toLowerCase();
+      if(t.includes("png")) return "png";
+      if(t.includes("webp")) return "webp";
+      if(t.includes("gif")) return "gif";
+      return "jpg";
+    }
+
+    async function uploadAndLog({ file, matchId, matchDistance }){
+      if(file.size > 10 * 1024 * 1024){
+        throw new Error("File too large (max 10MB).");
+      }
+
+      const ext = guessExt(file);
+      const objectPath = `incoming/${crypto.randomUUID()}.${ext}`;
+
+      const { error: upErr } = await supabase
+        .storage.from("uploads")
+        .upload(objectPath, file, { contentType: file.type || "application/octet-stream", upsert: false });
+
+      if(upErr) throw new Error("Upload failed: " + upErr.message);
+
+      const { error: logErr } = await supabase
+        .from("uploads_log")
+        .insert([{
+          object_path: objectPath,
+          content_type: file.type || null,
+          size_bytes: file.size,
+          consent: true,
+          match_id: matchId,
+          match_distance: matchDistance
+        }]);
+
+      if(logErr) throw new Error("Log failed: " + logErr.message);
+
+      return objectPath;
+    }
+
     fileEl.addEventListener('change', async () => {
       const f = fileEl.files && fileEl.files[0];
-      if(!f) return;
-      imgBitmap = await createImageBitmap(f);
-      statusEl.textContent = "Ready.";
+      pickedFile = f || null;
+      imgBitmap = null;
+
+      if(!pickedFile){
+        statusEl.textContent = "";
+        updateMatchEnabled();
+        return;
+      }
+
+      statusEl.textContent = "Loading image…";
+      imgBitmap = await createImageBitmap(pickedFile);
+      statusEl.textContent = "Ready. Check consent, then Match.";
+      updateMatchEnabled();
     });
+
+    consentEl.addEventListener('change', updateMatchEnabled);
 
     resetBtn.addEventListener('click', () => {
       fileEl.value = "";
+      pickedFile = null;
       imgBitmap = null;
       bestImg.style.display = 'none';
       bestText.textContent = "No match yet.";
       bestMeta.textContent = "";
       statusEl.textContent = "";
+      consentEl.checked = false;
+      updateMatchEnabled();
     });
 
     matchBtn.addEventListener('click', async () => {
       try{
-        if(!imgBitmap){ statusEl.textContent = "Upload an image first."; return; }
+        if(!imgBitmap || !pickedFile){ statusEl.textContent = "Upload an image first."; return; }
+        if(!consentEl.checked){ statusEl.textContent = "Consent is required."; return; }
+
+        const t0 = performance.now();
 
         statusEl.textContent = "Loading dataset…";
         const [hashes, labels] = await Promise.all([
@@ -124,18 +209,34 @@
           }
         }
 
-        if(!bestName){ bestText.textContent = "No match found."; return; }
+        if(!bestName){
+          bestText.textContent = "No match found.";
+          statusEl.textContent = "No match found.";
+          return;
+        }
+
+        statusEl.textContent = "Uploading + logging…";
+        const objectPath = await uploadAndLog({
+          file: pickedFile,
+          matchId: bestName,
+          matchDistance: bestDist
+        });
+
+        const t1 = performance.now();
+        const ms = Math.round(t1 - t0);
 
         bestImg.src = `../dataset/images/${bestName}`;
         bestImg.style.display = 'block';
         bestText.textContent = labels[bestName] || "You’ve got this. Keep going.";
-        bestMeta.textContent = `Match: ${bestName} • Distance: ${bestDist}`;
+        bestMeta.textContent = `Match: ${bestName} • Distance: ${bestDist} • Time: ${ms}ms • Stored: ${objectPath}`;
 
         statusEl.textContent = "Done.";
       }catch(e){
         statusEl.textContent = "Error: " + (e?.message || e);
       }
     });
+
+    updateMatchEnabled();
   </script>
 </main>
 </body>
