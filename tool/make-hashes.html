@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Make hashes.json</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Arial;margin:0;line-height:1.6}
+    main{max-width:980px;margin:0 auto;padding:28px}
+    .card{border:1px solid #00000022;border-radius:16px;padding:16px;margin:14px 0}
+    textarea{width:100%;min-height:130px;font-family:ui-monospace,Menlo,monospace}
+    pre{white-space:pre-wrap;word-break:break-word;background:#00000008;padding:12px;border-radius:12px}
+    .btn{border:1px solid #00000022;border-radius:12px;padding:10px 14px;background:#fff;cursor:pointer}
+    .muted{opacity:.75}
+  </style>
+</head>
+<body>
+<main>
+  <a href="../" class="muted">← Back</a>
+  <h1>Generate dataset/hashes.json</h1>
+  <p class="muted">Enter image filenames exactly as they appear in <code>dataset/images/</code>, one per line.</p>
+
+  <div class="card">
+    <textarea id="names" placeholder="Example:
+0001.jpg
+0002.jpg
+0003.jpg"></textarea>
+    <button class="btn" id="go">Generate</button>
+    <p class="muted" id="status"></p>
+  </div>
+
+  <div class="card">
+    <h2>Output</h2>
+    <p class="muted">Copy this JSON into <code>dataset/hashes.json</code>.</p>
+    <pre id="out">{}</pre>
+  </div>
+
+<script>
+  const statusEl = document.getElementById('status');
+  const outEl = document.getElementById('out');
+
+  function dhashFromImage(img, size=8){
+    const w = size + 1, h = size;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, w, h);
+    const data = ctx.getImageData(0,0,w,h).data;
+
+    let bits = 0n;
+    for(let y=0; y<h; y++){
+      for(let x=0; x<size; x++){
+        const i1 = (y*w + x) * 4;
+        const i2 = (y*w + x + 1) * 4;
+        const g1 = data[i1]*0.299 + data[i1+1]*0.587 + data[i1+2]*0.114;
+        const g2 = data[i2]*0.299 + data[i2+1]*0.587 + data[i2+2]*0.114;
+        bits = (bits << 1n) | (g1 > g2 ? 1n : 0n);
+      }
+    }
+    let hex = bits.toString(16).padStart(16, '0');
+    return hex;
+  }
+
+  function loadImg(src){
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Failed to load: " + src));
+      img.src = src;
+    });
+  }
+
+  document.getElementById('go').addEventListener('click', async () => {
+    const names = document.getElementById('names').value
+      .split('\n').map(s => s.trim()).filter(Boolean);
+
+    if(names.length === 0){
+      statusEl.textContent = "Add at least one filename.";
+      return;
+    }
+
+    statusEl.textContent = "Generating…";
+    const hashes = {};
+    try{
+      for(const name of names){
+        const src = `../dataset/images/${name}`;
+        const img = await loadImg(src);
+        hashes[name] = dhashFromImage(img);
+      }
+      outEl.textContent = JSON.stringify(hashes, null, 2);
+      statusEl.textContent = "Done.";
+    }catch(e){
+      statusEl.textContent = e.message || String(e);
+    }
+  });
+</script>
+</main>
+</body>
+</html>
